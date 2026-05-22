@@ -26,18 +26,37 @@ def gerar_mapa_calor(dataframe, modelo=None, incremento=0.0):
     df_local = dataframe.copy()
     
     if incremento > 0.0 and modelo is not None:
-        # Em modelos lineares simples, a variação é baseada no coeficiente (slope)
-        # Delta_Temp = Coeficiente * Incremento_NDVI
-        coeficiente = modelo.coef_[0]
-        diferenca_temperatura = coeficiente * incremento
+        # 1. Calcula a situação simulada (NDVI médio atual + incremento)
+        situacao_simulada = np.array([[ndvi_medio_atual + incremento]])
+        temp_prevista_ia = modelo.predict(situacao_simulada)[0]
         
-        # Aplica a redução real predita pelo modelo em cada pixel uniformemente
-        df_local['exibicao_temp'] = df_local['temperatura_lst'] + diferenca_temperatura
+        # 2. Descobre a redução exata calculada pela IA
+        reducao_termica = temp_media_atual - temp_prevista_ia
+        reducao_termica = max(0.0, reducao_termica)
+        
+        # 3. Subtrai a redução da temperatura
+        df_local['exibicao_temp'] = df_local['temperatura_lst'] - reducao_termica
     else:
-        # Se o incremento for 0, a temperatura de exibição é a original
         df_local['exibicao_temp'] = df_local['temperatura_lst']
 
-    dados_calor = df_local[['latitude', 'longitude', 'exibicao_temp']].values.tolist()
+    # =========================================================================
+    # O SEGREDO PARA FAZER O FOLIUM MUDAR: Normalizar os pesos dinamicamente
+    # Criamos um peso baseado no quanto a temperatura local se aproxima do zero absoluto do mapa
+    # Se a temperatura cai, o peso diminui e a mancha vermelha clareia/some.
+    # =========================================================================
+    temp_min_absoluta = float(df['temperatura_lst'].min())
+    
+    # O peso será a distância do ponto até a temperatura mínima real registrada
+    df_local['peso_visual'] = df_local['exibicao_temp'] - (temp_min_absoluta - 2)
+    # Evita qualquer valor negativo bizarro
+    df_local['peso_visual'] = df_local['peso_visual'].clip(lower=0)
+
+    # Criamos a lista com [latitude, longitude, peso_visual]
+    dados_calor = df_local[['latitude', 'longitude', 'peso_visual']].values.tolist()
+    
+    # O max_val visual fixado garante que a escala de peso seja idêntica em ambos os mapas,
+    # fazendo com que o mapa com menor temperatura perca intensidade vermelha.
+    max_val_visual = TEMP_MAX_ABSOLUTA - (temp_min_absoluta - 2)
 
     m = folium.Map(
         location=[-12.9712, -38.4603],
@@ -56,7 +75,7 @@ def gerar_mapa_calor(dataframe, modelo=None, incremento=0.0):
         radius=25,
         blur=18,
         min_opacity=0.4,
-        max_val=TEMP_MAX_ABSOLUTA + (modelo.coef_[0] * incremento if modelo and incremento > 0 else 0),  
+        max_val=TEMP_MAX_ABSOLUTA,
         gradient={0.4: 'blue', 0.65: 'yellow', 1.0: 'red'}
     ).add_to(m)
 
@@ -146,7 +165,8 @@ with col_direita_mapas:
     total_pixels = len(df)
     area_por_pixel = 900  # 30m x 30m = 900m²
     area_arvore = 30      # Espaço médio ocupado por uma árvore (m²)
-
+    #Area total mapeada
+    area_total_mapeada = total_pixels * area_por_pixel
     # --- MAPA ORIGINAL (Esquerda - Fixo em incremento=0.0) ---
     with subcol_mapa1:
         st.subheader("Mapa de Calor Atual")
@@ -156,8 +176,8 @@ with col_direita_mapas:
         #---------------------------------------------------------------------
         
         st.markdown("#### Dados Atuais")
-        st.metric(label="🌿 Estimativa do índice de densidade vegetal (NDVI) médio", value=f"{ndvi_medio_atual:.3f}")
-        st.metric(label="🌡️ Estimativa da temperatura média", value=f"{temp_media_mapa1:.1f} °C")
+        st.metric(label="🌿 Estimativa do índice de densidade vegetal (NDVI) médio da região:", value=f"{ndvi_medio_atual:.3f}")
+        st.metric(label="🌡️ Estimativa da temperatura média da região:", value=f"{temp_media_mapa1:.1f} °C")
         # --- CÁLCULO E NOVO ST.METRIC PARA ÁRVORES ATUAIS ---
         porcentagem_cobertura_atual = (ndvi_medio_atual / 0.5) * 0.25 if ndvi_medio_atual > 0 else 0
         area_verde_atual = (total_pixels * area_por_pixel) * porcentagem_cobertura_atual
@@ -165,7 +185,18 @@ with col_direita_mapas:
         qtd_arvores_atuais_fmt = f"{qtd_arvores_atuais:,}".replace(",", ".")
         
         # Seu novo st.metric adicionado aqui:
-        st.metric(label="🌳 Estimativa da população de árvores atual:", value=f"~ {qtd_arvores_atuais_fmt}")
+        st.metric(label="🌳 Estimativa da população de árvores atual da região:", value=f"~ {qtd_arvores_atuais_fmt}")
+
+        # --- NOVO METRIC DE ÁREA ATUAL ADICIONADO AQUI ---
+        area_verde_atual_ha = area_verde_atual / 10000
+        st.metric(
+            label="📐 Área de cobertura vegetal atual (Copas):", 
+            value=f"{area_verde_atual:,.0f} m²".replace(",", ".") + f" ({area_verde_atual_ha:.1f} ha)"
+        )
+        # --- TAXA PERCENTUAL ATUAL ---
+        pct_real_atual = (area_verde_atual / area_total_mapeada) * 100
+        st.metric(label="📊 Percentual de cobertura verde atual:", value=f"{pct_real_atual:.1f} %")
+
     # --- MAPA SIMULADO (Direita - Dinâmico com o Slider) ---
     with subcol_mapa2:
         st.subheader("Mapa de Calor Projetado")
@@ -185,15 +216,37 @@ with col_direita_mapas:
             qtd_arvores_futuras = qtd_arvores_atuais + qtd_arvores_novas
             qtd_arvores_futuras_fmt = f"{qtd_arvores_futuras:,}".replace(",", ".")
             delta_arvores_fmt = f"+{qtd_arvores_novas:,}".replace(",", ".")
+
+            area_verde_futura = area_verde_atual + area_reflorestada
+            area_verde_futura_ha = area_verde_futura / 10000
+            txt_area_projetada = f"{area_verde_futura:,.0f} m²".replace(",", ".") + f" ({area_verde_futura_ha:.1f} ha)"
+            
+            pct_real_futuro = (area_verde_futura / area_total_mapeada) * 100
+            delta_pct_fmt = f"+{(pct_real_futuro - pct_real_atual):.1f}%"
         else:
             qtd_arvores_futuras_fmt = f"{qtd_arvores_atuais:,}".replace(",", ".")
             delta_arvores_fmt = None
+            area_verde_atual_ha = area_verde_atual / 10000
+            txt_area_projetada = f"{area_verde_atual:,.0f} m²".replace(",", ".") + f" ({area_verde_atual_ha:.1f} ha)"
+            pct_real_futuro = pct_real_atual
+            delta_pct_fmt = None
 
         # Seu novo st.metric dinâmico adicionado aqui:
         st.metric(
             label="🌳 População de árvores projetada:", 
             value=f"~ {qtd_arvores_futuras_fmt}",
             delta=delta_arvores_fmt
+        )
+
+        st.metric(
+            label="📐 Área de cobertura vegetal projetada (Copas):", 
+            value=txt_area_projetada
+        )
+        
+        st.metric(
+            label="📊 Percentual de cobertura verde projetado:", 
+            value=f"{pct_real_futuro:.1f} %",
+            delta=delta_pct_fmt
         )
 
     # --- PARTE DE COMPARAÇÃO (Abaixo dos dois mapas) ---
@@ -230,7 +283,10 @@ with col_direita_mapas:
                 f"**{qtd_arvores_formatada} árvores** de médio porte no bairro - alocadas nas zonas térmicas críticas (vermelhas) identificadas no mapa atual para maximizar o resfriamento.\n\n"
                 f"**Nota Metodológica:** O cálculo utiliza a escala real de **30x30m por pixel** "
                 f"do satélite Landsat 8 (onde cada pixel representa 900m²). Estatisticamente, o algoritmo assume uma "
-                f"distribuição uniforme do ganho de biomassa na média macro do ecossistema urbano."
+                f"distribuição uniforme do ganho de biomassa na média macro do ecossistema urbano:"
+                f":🔴 Calor Crítico: Núcleo de alta retenção térmica (áreas impermeabilizadas, asfalto, pouca vegetação)"
+                f"|🟡 Transição: Áreas de influência direta do calor em dispersão."
+                f"|🔵 Zona Amena / Dissipação: Limiar onde o efeito da ilha de calor começa a perder força e se integrar ao microclima local."
             )
         
 with col_comp2:
