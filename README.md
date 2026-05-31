@@ -10,7 +10,7 @@ O Tree Zone é uma plataforma que cruza dados reais de temperatura e vegetação
 
 ## 🎯 O Problema
 
-Bairros periféricos com pouca arborização chegam a ser **até 5 °C mais quentes** do que bairros arborizados da mesma cidade. Esse calor desigual gera estresse térmico, aumenta internações em postos de saúde e dispara a conta de energia de quem menos pode pagar.
+Locais com pouca arborização chegam a ser **até 5 °C mais quentes** do que bairros arborizados da mesma região. Esse calor desigual gera estresse térmico, aumenta internações em postos de saúde e dispara a conta de energia de quem menos pode pagar.
 
 ## 💡 A Solução
 
